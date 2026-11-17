@@ -1,0 +1,87 @@
+name: Actualizar dashboard Kaleos
+
+on:
+  # GitHub programa en hora UTC y no cambia con el horario de verano, así que hay dos
+  # horarios y el paso "gate" deja pasar solo el que cae a las 5:40 en Madrid
+  # (verano = 03:40 UTC, invierno = 04:40 UTC). Así el dashboard está listo antes de las 7:00.
+  schedule:
+    - cron: "40 3 * * *"
+    - cron: "40 4 * * *"
+  workflow_dispatch: {}   # botón "Run workflow" para lanzarlo a mano
+
+permissions:
+  contents: write   # para guardar last_update.txt (evita que GitHub pause el cron por inactividad)
+  pages: write
+  id-token: write
+
+concurrency:
+  group: dashboard
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Comprobar hora de Madrid
+        id: gate
+        run: |
+          go=false
+          if [ "${{ github.event_name }}" != "schedule" ]; then go=true; fi
+          OFF=$(TZ=Europe/Madrid date +%z)   # +0100 invierno, +0200 verano
+          if [ "$OFF" = "+0100" ] && [ "${{ github.event.schedule }}" = "40 4 * * *" ]; then go=true; fi
+          if [ "$OFF" = "+0200" ] && [ "${{ github.event.schedule }}" = "40 3 * * *" ]; then go=true; fi
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+          echo "Madrid UTC$OFF · cron '${{ github.event.schedule }}' · ejecutar=$go"
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.go == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.go == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependencias
+        if: steps.gate.outputs.go == 'true'
+        run: pip install -r requirements.txt
+
+      - name: Descargar datos de Windsor y generar el dashboard
+        if: steps.gate.outputs.go == 'true'
+        env:
+          WINDSOR_API_KEY: ${{ secrets.WINDSOR_API_KEY }}
+        run: python build.py
+
+      - name: Preparar la web
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          mkdir -p site
+          cp dist/index.html site/index.html
+          touch site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+        if: steps.gate.outputs.go == 'true'
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.gate.outputs.go == 'true'
+        with:
+          path: site
+
+      - name: Publicar en GitHub Pages
+        id: deploy
+        if: steps.gate.outputs.go == 'true'
+        uses: actions/deploy-pages@v4
+
+      - name: Registrar la actualización
+        if: steps.gate.outputs.go == 'true'
+        run: |
+          TZ=Europe/Madrid date "+%Y-%m-%d %H:%M (Madrid)" > last_update.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add last_update.txt
+          git commit -m "Dashboard actualizado $(TZ=Europe/Madrid date +%F)" || echo "Sin cambios"
+          git push || echo "No se pudo guardar last_update.txt (no afecta al dashboard)"
